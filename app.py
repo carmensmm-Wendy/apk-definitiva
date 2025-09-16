@@ -20,8 +20,8 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
 # Credenciales (fijas según tu preferencia previa)
-VALID_USER = "mjesus40"
-VALID_PASS = "198409"
+VALID_USER = "carmensmm"
+VALID_PASS = "wendy67"
 
 # ---------------------------
 # MODELOS
