@@ -5,21 +5,9 @@
     <title>{{ title if title else "Sistema Créditos" }}</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        /* Quitar flechitas de inputs tipo number */
-        input[type=number]::-webkit-outer-spin-button,
-        input[type=number]::-webkit-inner-spin-button {
-            -webkit-appearance: none;
-            margin: 0;
-        }
-        input[type=number] {
-            -moz-appearance: textfield;
-        }
-
-        /* Solo la celda del abono se pone verde */
-        td.abono-realizado {
+        .abono-realizado {
             background-color: #d4edda !important; /* verde */
         }
-
         .btn-x {
             color: red;
             font-weight: bold;

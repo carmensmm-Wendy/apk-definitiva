@@ -1,12 +1,9 @@
-
-# app.py - Unificado y corregido para manejo consistente de caja (Postgres incluido)
+# app.py - Versión unificada y completa (manejo consistente de caja y liquidaciones)
 import os
 import random
 from datetime import date, datetime, timedelta, time
 
-from flask import (
-    Flask, render_template, request, redirect, url_for, flash, session, jsonify
-)
+from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from functools import wraps
 
@@ -14,20 +11,18 @@ from functools import wraps
 # Configuración
 # ---------------------------
 app = Flask(__name__)
-# Cambia la secret si quieres
 app.secret_key = os.environ.get("APP_SECRET", "clave_secreta_local_cámbiala")
 
-# Si quieres usar la URL de Render que compartiste, queda como valor por defecto aquí.
-# Recomendado: en producción usa la variable de entorno DATABASE_URL.
-DB_DEFAULT = "postgresql://apk_nueva_user:z8mHo4h0ELOAB68Ry5cKitfeEYiJ9A0K@dpg-d3517uu3jp1c73em8g2g-a/apk_nueva"
+# Si prefieres definir DATABASE_URL en el entorno, se usará; en caso contrario, se usa DB_DEFAULT.
+DB_DEFAULT = "postgresql+psycopg2://apk_nueva_user:z8mHo4h0ELOAB68Ry5cKitfeEYiJ9A0K@dpg-d3517uu3jp1c73em8g2g-a.oregon-postgres.render.com/apk_nueva"
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", DB_DEFAULT)
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
 
-# Validación de sesión simple
-VALID_USER = "M-Jesus"
-VALID_PASS = "honny1991"
+# Credenciales (simples)
+VALID_USER = "carmensmm"
+VALID_PASS = "wendy67"
 
 # ---------------------------
 # MODELOS
@@ -38,10 +33,10 @@ class Cliente(db.Model):
     orden = db.Column(db.Integer, nullable=False, default=0)
     nombre = db.Column(db.String(200), nullable=False)
     direccion = db.Column(db.String(300), nullable=True)
-    monto = db.Column(db.Float, nullable=False, default=0.0)      # monto prestado original (ej. capital)
-    plazo = db.Column(db.Integer, nullable=False, default=30)     # plazo en días
-    interes = db.Column(db.Float, nullable=False, default=0.0)   # porcentaje
-    saldo = db.Column(db.Float, nullable=False, default=0.0)     # saldo pendiente
+    monto = db.Column(db.Float, nullable=False, default=0.0)         # capital prestado
+    plazo = db.Column(db.Integer, nullable=False, default=30)        # días
+    interes = db.Column(db.Float, nullable=False, default=0.0)      # %
+    saldo = db.Column(db.Float, nullable=False, default=0.0)        # saldo pendiente
     fecha_creacion = db.Column(db.Date, default=date.today)
     ultimo_abono_fecha = db.Column(db.Date, nullable=True)
 
@@ -81,7 +76,7 @@ class Liquidacion(db.Model):
     paquete = db.Column(db.Float, default=0.0)
 
 # ---------------------------
-# HELPERS y UTILIDADES
+# HELPERS / UTILIDADES
 # ---------------------------
 def login_required(f):
     @wraps(f)
@@ -102,7 +97,6 @@ def paquete_total_actual():
     return float(s or 0.0)
 
 def day_range(fecha: date):
-    """Devuelve inicio y fin (datetime) del día `fecha` para consultas [start, end)."""
     start = datetime.combine(fecha, time.min)
     end = start + timedelta(days=1)
     return start, end
@@ -118,22 +112,14 @@ def movimientos_caja_totales_para_dia(fecha: date):
     return float(entrada), float(salida), float(gasto)
 
 def crear_liquidacion_para_fecha(fecha: date):
-    """
-    Crea liquidación diaria para `fecha` si no existe.
-    Importante: la caja la calculamos **a partir de movimientos** (MovimientoCaja),
-    no sumando tot_abonos + tot_prestamos (evita doble conteo).
-    """
     fecha = fecha if isinstance(fecha, date) else fecha.date()
     liq = Liquidacion.query.filter_by(fecha=fecha).first()
     if liq:
         return liq
 
     start, end = day_range(fecha)
-
-    # Totales para reporte (se obtienen de Abono/Prestamo)
     tot_abonos = db.session.query(db.func.coalesce(db.func.sum(Abono.monto), 0)).filter(Abono.fecha >= start, Abono.fecha < end).scalar() or 0.0
     tot_prestamos = db.session.query(db.func.coalesce(db.func.sum(Prestamo.monto), 0)).filter(Prestamo.fecha >= start, Prestamo.fecha < end).scalar() or 0.0
-
     paquete_actual = paquete_total_actual()
 
     ultima = Liquidacion.query.filter(Liquidacion.fecha < fecha).order_by(Liquidacion.fecha.desc()).first()
@@ -141,8 +127,7 @@ def crear_liquidacion_para_fecha(fecha: date):
 
     mov_entrada, mov_salida, mov_gasto = movimientos_caja_totales_para_dia(fecha)
 
-    # caja se mueve solo por movimientos (evitamos sumar tot_abonos/tot_prestamos porque
-    # si a la vez insertamos MovimientoCaja para abonos/préstamos, se duplicaría)
+    # Caja se calcula únicamente con movimientos (evitamos duplicar sumas si también guardamos abonos como movimientos)
     caja = caja_anterior + mov_entrada - mov_salida - mov_gasto
 
     liq = Liquidacion(
@@ -162,7 +147,6 @@ def asegurar_liquidaciones_contiguas():
     if not ultima:
         crear_liquidacion_para_fecha(hoy)
         return
-
     dia = ultima.fecha + timedelta(days=1)
     while dia <= hoy:
         crear_liquidacion_para_fecha(dia)
@@ -175,7 +159,6 @@ def actualizar_liquidacion_por_movimiento(fecha: date):
         liq = crear_liquidacion_para_fecha(fecha)
 
     start, end = day_range(fecha)
-
     tot_abonos = float(db.session.query(db.func.coalesce(db.func.sum(Abono.monto), 0)).filter(Abono.fecha >= start, Abono.fecha < end).scalar() or 0.0)
     tot_prestamos = float(db.session.query(db.func.coalesce(db.func.sum(Prestamo.monto), 0)).filter(Prestamo.fecha >= start, Prestamo.fecha < end).scalar() or 0.0)
     paquete_actual = paquete_total_actual()
@@ -247,6 +230,11 @@ def index():
     clientes = Cliente.query.order_by(Cliente.orden).all()
     return render_template("index.html", clientes=clientes, hoy=date.today(), estado_class=cliente_estado_class, liq_hoy=liq_hoy)
 
+@app.route("/inicio")
+@login_required
+def inicio():
+    return redirect(url_for("index"))
+
 @app.route("/dashboard")
 @login_required
 def dashboard():
@@ -257,7 +245,7 @@ def dashboard():
     return render_template("dashboard.html", total_clientes=total_clientes, total_abonos=total_abonos, total_prestamos=total_prestamos, paquete=paquete)
 
 # ---------------------------
-# CLIENTES: CREAR/EDITAR/ELIMINAR
+# CLIENTES: CREAR / EDITAR / ELIMINAR
 # ---------------------------
 @app.route("/nuevo_cliente", methods=["GET", "POST"])
 @login_required
@@ -290,19 +278,17 @@ def nuevo_cliente():
             fecha_creacion=date.today()
         )
         db.session.add(cliente)
-        db.session.flush()
+        db.session.flush()  # obtener id antes de crear relación
 
         # registrar préstamo y movimiento (salida en caja)
         prestamo = Prestamo(cliente_id=cliente.id, monto=monto, fecha=datetime.utcnow())
         db.session.add(prestamo)
-        # movimiento que representa la salida de caja por el préstamo
-        mov = MovimientoCaja(tipo="salida", monto=monto, descripcion=f"Prestamo {cliente.nombre}", fecha=datetime.utcnow())
+        mov = MovimientoCaja(tipo="salida", monto=monto, descripcion=f"Préstamo a {cliente.nombre}", fecha=datetime.utcnow())
         db.session.add(mov)
         db.session.flush()
         prestamo.movimiento_id = mov.id
 
         db.session.commit()
-
         actualizar_liquidacion_por_movimiento(date.today())
         flash("Cliente creado y préstamo registrado", "success")
         return redirect(url_for("index"))
@@ -361,9 +347,10 @@ def abonar(cliente_id):
     if monto_abono <= 0:
         flash("El abono debe ser mayor a 0", "warning")
         return redirect(url_for("index"))
-    if monto_abono > cliente.saldo + 1e9:  # no bloquear aquí estrictamente; puedes decidir la lógica
-        # si quieres evitar abonos mayores que saldo descomenta la validación real
-        pass
+    if monto_abono > cliente.saldo:
+        # Si no quieres bloquearlo quita esta validación; la dejo como aviso.
+        flash("El abono no puede ser mayor al saldo", "danger")
+        return redirect(url_for("index"))
 
     cliente.saldo -= monto_abono
     cliente.ultimo_abono_fecha = date.today()
@@ -371,7 +358,7 @@ def abonar(cliente_id):
     ab = Abono(cliente_id=cliente.id, monto=monto_abono, fecha=datetime.utcnow())
     db.session.add(ab)
 
-    # registrar movimiento en caja: entrada
+    # registrar movimiento en caja: entrada (asociado al abono)
     mov = MovimientoCaja(tipo="entrada", monto=monto_abono, descripcion=f"Abono {cliente.nombre}", fecha=datetime.utcnow())
     db.session.add(mov)
     db.session.flush()
@@ -387,7 +374,7 @@ def abonar(cliente_id):
 def eliminar_abono(abono_id):
     abono = Abono.query.get_or_404(abono_id)
     cliente = abono.cliente
-    fecha = abono.fecha.date() if isinstance(abono.fecha, datetime) else abono.fecha
+    fecha_dt = abono.fecha.date() if isinstance(abono.fecha, datetime) else abono.fecha
 
     # revertir saldo
     if cliente:
@@ -401,7 +388,7 @@ def eliminar_abono(abono_id):
             if otros == 0:
                 cliente.ultimo_abono_fecha = None
 
-    # eliminar movimiento asociado si existe
+    # eliminar movimiento asociado (si existe)
     if abono.movimiento_id:
         mov = MovimientoCaja.query.get(abono.movimiento_id)
         if mov:
@@ -409,12 +396,12 @@ def eliminar_abono(abono_id):
 
     db.session.delete(abono)
     db.session.commit()
-    actualizar_liquidacion_por_movimiento(fecha)
+    actualizar_liquidacion_por_movimiento(fecha_dt)
     flash("Abono eliminado, saldo repuesto y caja ajustada", "success")
     return redirect(url_for("liquidacion"))
 
 # ---------------------------
-# PRÉSTAMOS (detalles y eliminar)
+# PRÉSTAMOS
 # ---------------------------
 @app.route("/detalle_prestamos/<fecha>")
 @login_required
@@ -453,7 +440,7 @@ def eliminar_prestamo(prestamo_id):
     return redirect(url_for("liquidacion"))
 
 # ---------------------------
-# DETALLES (ABONOS)
+# DETALLES ABONOS (con fecha/hora)
 # ---------------------------
 @app.route("/detalle_abonos/<fecha>")
 @login_required
@@ -465,13 +452,11 @@ def detalle_abonos(fecha):
         return redirect(url_for("liquidacion"))
     start, end = day_range(f)
     abonos = Abono.query.filter(Abono.fecha >= start, Abono.fecha < end).all()
-
-    # Totales del día para mostrar en template
     tot_entrada, tot_salida, tot_gasto = movimientos_caja_totales_para_dia(f)
     return render_template("detalle_abonos.html", abonos=abonos, fecha=f, tot_entrada=tot_entrada, tot_salida=tot_salida, tot_gasto=tot_gasto)
 
 # ---------------------------
-# API detalle (opcional)
+# API (opcional)
 # ---------------------------
 @app.route("/api/detalle/abonos/<fecha>")
 @login_required
@@ -558,7 +543,36 @@ def caja_gasto():
     return redirect(url_for("liquidacion"))
 
 # ---------------------------
-# LIQUIDACIÓN / BUSCAR / RESUMEN
+# REORDENAR CLIENTES
+# ---------------------------
+@app.route("/actualizar_orden/<int:cliente_id>", methods=["POST"])
+@login_required
+def actualizar_orden(cliente_id):
+    cliente = Cliente.query.get_or_404(cliente_id)
+    try:
+        nuevo_orden = int(request.form.get("orden", cliente.orden))
+    except ValueError:
+        flash("Orden inválido", "warning")
+        return redirect(url_for("index"))
+
+    if nuevo_orden <= 0:
+        flash("El orden debe ser mayor a 0", "warning")
+        return redirect(url_for("index"))
+
+    clientes = Cliente.query.order_by(Cliente.orden).all()
+    if cliente in clientes:
+        clientes.remove(cliente)
+    insert_index = min(nuevo_orden - 1, len(clientes))
+    clientes.insert(insert_index, cliente)
+    for idx, c in enumerate(clientes, start=1):
+        c.orden = idx
+
+    db.session.commit()
+    flash("Orden actualizado correctamente", "success")
+    return redirect(url_for("index"))
+
+# ---------------------------
+# LIQUIDACIÓN / RESUMEN
 # ---------------------------
 @app.route("/liquidacion")
 @login_required
@@ -568,8 +582,8 @@ def liquidacion():
 
     fecha_inicio = request.args.get("fecha_inicio")
     fecha_fin = request.args.get("fecha_fin")
-
     resumen_rango = None
+
     if fecha_inicio and fecha_fin:
         try:
             desde = datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
