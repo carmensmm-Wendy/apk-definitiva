@@ -3,21 +3,23 @@
 
 {% block content %}
 <h2 class="mb-4">📋 Listado de Clientes</h2>
+<p class="text-end text-muted mb-3">🕒 Hora actual en Chile: <span id="horaChile"></span></p>
 
-<!-- Botones principales -->
+<!-- =================== BOTONES PRINCIPALES =================== -->
 <div class="mb-3 d-flex flex-wrap gap-2">
-  <a class="btn btn-primary" href="{{ url_for('nuevo_cliente') }}">➕ Nuevo Cliente</a>
-  <a class="btn btn-secondary" href="{{ url_for('liquidacion') }}">📊 Ver Liquidación</a>
-  <a class="btn btn-outline-dark" href="{{ url_for('clientes_cancelados_view') }}">🚫 Cancelados</a>
+  <a class="btn btn-primary" href="{{ url_for('app_rutas.nuevo_cliente') }}">➕ Nuevo Cliente</a>
+  <a class="btn btn-secondary" href="{{ url_for('app_rutas.liquidacion_view') }}">📊 Ver Liquidación</a>
+  <a class="btn btn-outline-dark" href="{{ url_for('app_rutas.clientes_cancelados_view') }}">🚫 Cancelados</a>
+  <a class="btn btn-outline-primary" href="{{ url_for('app_rutas.dashboard') }}">📈 Dashboard</a>
+  <a class="btn btn-outline-success" href="{{ url_for('app_rutas.ganancias_mes_view') }}">💰 Ganancias</a>
 </div>
 
-<!-- Fecha y totales -->
-<p><strong>Fecha:</strong> {{ hoy.strftime("%d/%m/%Y") }}</p>
+<!-- =================== BUSCADOR DE CLIENTES =================== -->
 <div class="mb-3">
-  <strong>Caja total:</strong> ${{ "%.2f"|format(resumen.caja_total) }} |
-  <strong>Cartera total:</strong> ${{ "%.2f"|format(resumen.cartera_total) }}
+  <input type="text" id="buscarCliente" class="form-control" placeholder="🔍 Buscar cliente por nombre...">
 </div>
 
+<!-- =================== TABLA DE CLIENTES =================== -->
 {% if clientes %}
 <table id="tabla-clientes" class="table table-bordered table-hover align-middle text-center">
   <thead class="table-dark">
@@ -26,185 +28,184 @@
       <th>Código</th>
       <th>Fecha</th>
       <th>Nombre</th>
-      <th>Monto Prestado</th>
+      <th>Venta</th>
+      <th>Cuota</th>
+      <th>Cuotas Atrasadas</th>
+      <th>Último Abono</th>
       <th>Abonar</th>
       <th>Saldo</th>
-      <th>Eliminar</th>
+      <th>Eliminar</th>  <!-- 👈 solo esta -->
     </tr>
   </thead>
   <tbody>
     {% for c in clientes %}
-    <tr id="cliente-{{ c.id }}"
-        class="{% if c.cancelado %}cancelado{% elif c.estado_plazo == 'vencido' %}plazo-vencido{% elif c.estado_plazo == 'moroso' %}plazo-moroso{% endif %}">
-      
-      <!-- Orden -->
-      <td style="width:100px;">
-        <form action="{{ url_for('actualizar_orden', cliente_id=c.id) }}" method="post" class="d-flex actualizar-orden-form">
-          <input type="number" name="orden" value="{{ c.orden }}" class="form-control text-center" style="width:70px;"
-                 {% if c.cancelado %}disabled{% endif %}>
-          <button type="submit" class="btn btn-outline-primary ms-1 btn-sm" {% if c.cancelado %}disabled{% endif %}>✔</button>
-        </form>
-      </td>
+      {% set u = (c.prestamos|sort(attribute='fecha'))|last if c.prestamos else None %}
+      {% set dias_desde = (hoy - u.fecha).days if u and u.fecha else 0 %}
 
-      <td>{{ c.codigo }}</td>
-      <td>{{ c.fecha_creacion.strftime("%d/%m/%Y") }}</td>
-      <td>{{ c.nombre }}</td>
-      <td>{{ "%.2f"|format(c.capital_total()) }}</td>
+      <tr id="cliente-{{ c.id }}"
+          class="fila-cliente
+            {% if u and (u.frecuencia or 'diario') == 'mensual' and dias_desde >= 30 and not c.cancelado %}interes-vencido{% endif %}
+            {% if c.cancelado %}cancelado{% elif c.estado_plazo == 'vencido' %}plazo-vencido{% elif c.estado_plazo == 'moroso' %}plazo-moroso{% endif %}
+          ">
 
-      <!-- Abono -->
-      <td class="abono-td">
-        {% if not c.cancelado %}
-        <form action="{{ url_for('registrar_abono_por_codigo') }}" 
-              method="post" 
-              class="d-flex justify-content-center form-abono"
-              data-orden="{{ c.orden }}">
-          <input type="hidden" name="codigo" value="{{ c.codigo }}">
-          <input type="number" step="0.01" min="0.01" name="monto" placeholder="0"
-                 class="form-control text-end abono-input fw-bold {% if c.ultimo_abono_fecha == hoy %}bg-success text-white{% endif %}"
-                 style="width:120px; height:50px; font-size:1.4rem;" 
-                 required autocomplete="off">
-          <button type="submit" class="btn btn-success ms-2" style="font-size:1.4rem; padding:0 15px;">💵</button>
-        </form>
-        {% else %}
-          <span class="text-muted">Cancelado</span>
-        {% endif %}
-      </td>
+        <!-- ORDEN -->
+        <td style="width:100px;">
+          <form action="{{ url_for('app_rutas.actualizar_orden', cliente_id=c.id) }}" method="post" class="d-flex actualizar-orden-form">
+            <input type="number" name="orden" value="{{ c.orden }}" class="form-control text-center" style="width:70px;" {% if c.cancelado %}disabled{% endif %}>
+            <button type="submit" class="btn btn-outline-primary ms-1 btn-sm" {% if c.cancelado %}disabled{% endif %}>✔</button>
+          </form>
+        </td>
 
-      <!-- Saldo -->
-      <td>
-        {% if c.cancelado %}
-          <span class="text-muted saldo-texto" data-cliente-id="{{ c.id }}">0.00</span>
-        {% else %}
-          <button class="btn btn-link p-0 saldo-clickable saldo-texto" data-cliente-id="{{ c.id }}">
-            {{ "%.2f"|format(c.saldo_total()) }}
-          </button>
-        {% endif %}
-      </td>
+        <!-- DATOS PRINCIPALES -->
+        <td>{{ c.codigo }}</td>
+        <td>{{ c.fecha_creacion.strftime("%d/%m/%Y") }}</td>
+        <td class="nombre-cliente">{{ c.nombre }}</td>
 
-      <!-- Eliminar cliente -->
-      <td>
-        <form action="{{ url_for('eliminar_cliente', cliente_id=c.id) }}" method="post"
-              onsubmit="return confirm('¿Seguro que deseas eliminar este cliente?');">
-          <button type="submit" class="btn btn-danger btn-sm">❌</button>
-        </form>
-      </td>
-    </tr>
+        <!-- MONTO PRESTADO -->
+        <td>{{ "%.2f"|format(c.capital_total_sin_interes()) }}</td>
+
+        <!-- CUOTA -->
+        <td>
+          {{ "%.2f"|format(c.valor_cuota()) }}
+          {% if c.prestamos %}
+            {% set u = (c.prestamos|sort(attribute='fecha'))|last %}
+            {% if u.frecuencia %}
+              <small class="text-muted">({{ u.frecuencia }})</small>
+            {% endif %}
+          {% endif %}
+        </td>
+
+        <!-- CUOTAS ATRASADAS -->
+        <td>{{ c.cuotas_atrasadas() }}</td>
+
+        <!-- ÚLTIMO ABONO -->
+        <td>{{ "%.2f"|format(c.ultimo_abono_monto()) }}</td>
+
+        <!-- ABONAR -->
+        <td class="abono-td">
+          {% if not c.cancelado %}
+          <form action="{{ url_for('app_rutas.registrar_abono_por_codigo') }}"
+                method="post"
+                class="d-flex justify-content-center form-abono"
+                data-orden="{{ c.orden }}">
+            <input type="hidden" name="codigo" value="{{ c.codigo }}">
+            <input type="number" step="0.01" min="0.01" name="monto" placeholder="0"
+                   class="form-control text-end abono-input fw-bold {% if c.ultimo_abono_fecha == hoy %}bg-success text-white{% endif %}"
+                   style="width:120px; height:50px; font-size:1.4rem;"
+                   required autocomplete="off">
+            <button type="submit" class="btn btn-success ms-2" style="font-size:1.4rem; padding:0 15px;">💵</button>
+          </form>
+          {% else %}
+            <span class="text-muted">Cancelado</span>
+          {% endif %}
+        </td>
+
+        <!-- SALDO -->
+        <td>
+          {% if c.cancelado %}
+            <span class="text-muted saldo-texto" data-cliente-id="{{ c.id }}">0.00</span>
+          {% else %}
+            <button class="btn btn-link p-0 saldo-clickable saldo-texto" data-cliente-id="{{ c.id }}">
+              {{ "%.2f"|format(c.saldo_total()) }}
+            </button>
+          {% endif %}
+        </td>
+
+        <!-- 🗑️ ELIMINAR CLIENTE -->
+<td>
+  <button class="btn btn-danger btn-sm eliminar-cliente-btn"
+          data-id="{{ c.id }}"
+          data-nombre="{{ c.nombre }}">
+    🗑️ Eliminar
+  </button>
+</td>
+      </tr>
     {% endfor %}
   </tbody>
 </table>
 {% else %}
-<div class="alert alert-info">No hay clientes registrados aún.</div>
+  <div class="alert alert-info text-center">No hay clientes registrados aún.</div>
 {% endif %}
 
-<!-- ================== MODAL HISTORIAL ================== -->
-<div class="modal fade" id="modalHistorial" tabindex="-1" aria-labelledby="modalHistorialLabel" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+<!-- =================== MODAL EDITAR PRÉSTAMO =================== -->
+<div class="modal fade" id="modalEditarPrestamo" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
     <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title" id="modalHistorialLabel">Historial de Abonos</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      <form id="formEditarPrestamo" method="POST">
+        <div class="modal-header bg-primary text-white">
+          <h5 class="modal-title">Editar Préstamo de <span id="clienteNombre"></span></h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Plazo (días)</label>
+            <input type="number" name="plazo" id="editarPlazo" class="form-control" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Interés (%)</label>
+            <input type="number" step="0.01" name="interes" id="editarInteres" class="form-control" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Frecuencia</label>
+            <select name="frecuencia" id="editarFrecuencia" class="form-select">
+              <option value="diario">Diario</option>
+              <option value="semanal">Semanal</option>
+              <option value="quincenal">Quincenal</option>
+              <option value="mensual">Mensual</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+          <button type="submit" class="btn btn-success">Guardar Cambios</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- =================== MODAL HISTORIAL =================== -->
+<div class="modal fade" id="modalHistorial" tabindex="-1" aria-labelledby="modalHistorialLabel" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header bg-primary text-white">
+        <h5 class="modal-title" id="modalHistorialLabel">📘 Detalles del Cliente</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
-        <table class="table table-sm table-bordered text-center align-middle">
+        <h6 class="fw-bold mb-3">Datos del Préstamo</h6>
+        <table class="table table-sm table-bordered align-middle text-center">
           <thead class="table-light">
             <tr>
-              <th>Fecha</th>
-              <th>Hora</th>
-              <th>Nombre</th>
-              <th>Monto</th>
-              <th>Acción</th>
+              <th>Nombre</th><th>Fecha inicial</th><th>Monto</th><th>Total</th>
+              <th>Cuota</th><th>Modo</th><th>Datos</th><th>Saldo</th>
             </tr>
           </thead>
-          <tbody id="tablaHistorialBody">
-            <tr><td colspan="5"><em>Cargando...</em></td></tr>
-          </tbody>
+          <tbody id="tablaDatosPrestamo"><tr><td colspan="8"><em>Cargando...</em></td></tr></tbody>
+        </table>
+        <h6 class="fw-bold mt-4 mb-3">Historial de Abonos</h6>
+        <table class="table table-sm table-bordered text-center align-middle">
+          <thead class="table-light"><tr><th>Código</th><th>Fecha</th><th>Hora</th><th>Abono</th><th>Saldo</th><th>Acción</th></tr></thead>
+          <tbody id="tablaHistorialBody"><tr><td colspan="6"><em>Cargando...</em></td></tr></tbody>
         </table>
       </div>
     </div>
   </div>
 </div>
 
-<!-- ================== SCRIPTS ================== -->
+<!-- =================== SCRIPTS =================== -->
 <script>
 document.addEventListener("DOMContentLoaded", () => {
+  const modalEditar = new bootstrap.Modal(document.getElementById("modalEditarPrestamo"));
+  const formEditar = document.getElementById("formEditarPrestamo");
 
-  // --- Historial de abonos ---
-  document.querySelectorAll('.saldo-clickable').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const clienteId = btn.dataset.clienteId;
-      try {
-        const response = await fetch(`/historial_abonos/${clienteId}`);
-        const data = await response.json();
-        const tbody = document.getElementById("tablaHistorialBody");
-
-        if (data.abonos.length > 0) {
-          tbody.innerHTML = data.abonos.map(a => `
-            <tr>
-              <td>${a.fecha}</td>
-              <td>${a.hora || ""}</td>
-              <td>${a.nombre || ""}</td>
-              <td>$${a.monto.toFixed(2)}</td>
-              <td>
-                <button class="btn btn-danger btn-sm eliminar-abono" data-id="${a.id}">🗑️</button>
-              </td>
-            </tr>
-          `).join("");
-        } else {
-          tbody.innerHTML = `<tr><td colspan="5"><em>No hay abonos registrados</em></td></tr>`;
-        }
-
-        // ✅ Eliminación de abonos con actualización en vivo
-        document.querySelectorAll('.eliminar-abono').forEach(btn => {
-          btn.addEventListener('click', async () => {
-            if (!confirm('¿Seguro que deseas eliminar este abono?')) return;
-            const id = btn.dataset.id;
-            try {
-              const res = await fetch(`/eliminar_abono/${id}`, { 
-                method: 'POST', 
-                headers: { 'X-Requested-With': 'fetch' } 
-              });
-              if (!res.ok) return alert('Error al eliminar el abono.');
-
-              const data = await res.json();
-              btn.closest('tr').remove();
-
-              // 💲 Actualizar saldo en tiempo real
-              const saldoElem = document.querySelector(`.saldo-texto[data-cliente-id="${data.cliente_id}"]`);
-              if (saldoElem) {
-                saldoElem.textContent = data.saldo.toFixed(2);
-                saldoElem.style.transition = "background-color 0.6s";
-                saldoElem.style.backgroundColor = data.saldo > 0 ? "rgba(0,255,0,0.2)" : "rgba(255,0,0,0.2)";
-                setTimeout(() => saldoElem.style.backgroundColor = "", 800);
-              }
-
-              // 🔁 Si vuelve a estar activo, quitar opacidad
-              const fila = saldoElem ? saldoElem.closest("tr") : null;
-              if (fila && data.saldo > 0) fila.style.opacity = "1";
-
-            } catch (err) {
-              console.error(err);
-              alert("Error de conexión al eliminar abono.");
-            }
-          });
-        });
-
-        new bootstrap.Modal(document.getElementById('modalHistorial')).show();
-      } catch (err) {
-        console.error(err);
-        alert("Error al cargar historial.");
-      }
-    });
-  });
-
-  // --- ✅ Registro de abonos rápido, actualiza saldo automáticamente ---
-  const forms = document.querySelectorAll('.form-abono');
-
+  // --- Reproducir sonido de confirmación o error ---
   function playSound(success = true) {
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.type = success ? 'triangle' : 'sawtooth';
+      osc.type = success ? "triangle" : "sawtooth";
       osc.frequency.setValueAtTime(success ? 880 : 220, ctx.currentTime);
       gain.gain.setValueAtTime(0.1, ctx.currentTime);
       osc.connect(gain);
@@ -214,85 +215,368 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch {}
   }
 
-  const hoy = new Date().toISOString().slice(0, 10);
-  forms.forEach(form => {
-    const codigoCliente = form.querySelector('input[name="codigo"]').value;
-    const fechaGuardada = localStorage.getItem(`abonado_${codigoCliente}`);
-    const input = form.querySelector('input[name="monto"]');
-    if (fechaGuardada === hoy) input.classList.add('bg-success', 'text-white');
+  // --- Editar préstamo ---
+  document.querySelectorAll(".editar-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.id;
+      document.getElementById("clienteNombre").textContent = btn.dataset.nombre;
+      try {
+        const res = await fetch(`/editar_prestamo/${id}`);
+        const data = await res.json();
+        if (!data.ok) return alert(data.error || "Error al cargar datos.");
+        document.getElementById("editarPlazo").value = data.data.plazo;
+        document.getElementById("editarInteres").value = data.data.interes;
+        document.getElementById("editarFrecuencia").value = data.data.frecuencia || "diario";
+        formEditar.dataset.id = id;
+        modalEditar.show();
+      } catch { alert("Error de conexión."); }
+    });
   });
 
-  forms.forEach((form) => {
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const input = form.querySelector('input[name="monto"]');
-      const formData = new FormData(form);
+  formEditar.addEventListener("submit", async e => {
+    e.preventDefault();
+    const id = formEditar.dataset.id;
+    const formData = new FormData(formEditar);
+    const res = await fetch(`/editar_prestamo/${id}`, { method: "POST", body: formData });
+    const data = await res.json();
+    if (data.ok) { alert("✅ Cambios guardados."); location.reload(); }
+    else alert("❌ " + (data.error || "Error al guardar."));
+  });
+
+// --- Registrar abonos en vivo ---
+const forms = document.querySelectorAll(".form-abono");
+forms.forEach(form => {
+  form.addEventListener("submit", async e => {
+    e.preventDefault();
+    const input = form.querySelector("input[name='monto']");
+    const formData = new FormData(form);
+
+    try {
+      const res = await fetch(form.action, {
+        method: "POST",
+        body: formData,
+        headers: { "X-Requested-With": "fetch" } // 👈 importante
+      });
+      const data = await res.json();
+
+      if (!res.ok || !data.ok) {
+        playSound(false);
+        alert(data.error || "❌ Error al registrar abono.");
+        return;
+      }
+
+      // 💡 Si se aplicó un interés mensual, mostrar aviso visual
+      if (data.interes_aplicado) {
+        const fila = document.getElementById(`cliente-${data.cliente_id}`);
+        if (fila) {
+          fila.classList.remove("interes-vencido");
+
+          const alerta = document.createElement("div");
+          alerta.textContent = "💡 Interés aplicado";
+          alerta.style.position = "absolute";
+          alerta.style.backgroundColor = "#d1e7dd";
+          alerta.style.color = "#0f5132";
+          alerta.style.padding = "4px 8px";
+          alerta.style.borderRadius = "6px";
+          alerta.style.fontSize = "0.9em";
+          alerta.style.fontWeight = "bold";
+          alerta.style.boxShadow = "0 2px 6px rgba(0,0,0,0.2)";
+          alerta.style.zIndex = "9999";
+
+          const rect = fila.getBoundingClientRect();
+          alerta.style.left = `${rect.left + 100}px`;
+          alerta.style.top = `${rect.top + window.scrollY - 10}px`;
+
+          document.body.appendChild(alerta);
+
+          setTimeout(() => {
+            alerta.remove();
+          }, 2000);
+        }
+      }
+
+      playSound(true);
+      input.value = "";
+      input.classList.add("bg-success", "text-white");
+
+      const saldoElem = document.querySelector(`.saldo-texto[data-cliente-id="${data.cliente_id}"]`);
+      const fila = document.getElementById(`cliente-${data.cliente_id}`);
+
+      if (data.cancelado) {
+        // 💥 Si quedó cancelado, animar y eliminar fila
+        if (fila) {
+          fila.classList.add("table-danger");
+          fila.style.transition = "opacity 0.8s ease";
+          fila.style.opacity = "0";
+          setTimeout(() => fila.remove(), 800);
+        }
+
+        // ✅ Mostrar toast visual
+        const toast = document.createElement("div");
+        toast.className = "alert alert-info position-fixed top-0 start-50 translate-middle-x mt-3 shadow";
+        toast.style.zIndex = 2000;
+        toast.textContent = `✅ ${data.cliente_nombre || "Cliente"} quedó en saldo 0 y fue movido a cancelados.`;
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 4000);
+
+      } else if (saldoElem) {
+        // 🧮 Actualizar saldo normal
+        saldoElem.textContent = data.saldo.toFixed(2);
+        saldoElem.style.transition = "background-color 0.6s";
+        saldoElem.style.backgroundColor = "rgba(0,255,0,0.2)";
+        setTimeout(() => saldoElem.style.backgroundColor = "", 800);
+      }
+
+    } catch (err) {
+      playSound(false);
+      alert("❌ Error al conectar con el servidor.");
+      console.error(err);
+    }
+  });
+});
+     // --- Historial de abonos ---
+document.querySelectorAll(".saldo-clickable").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    const id = btn.dataset.clienteId;
+    const modalEl = document.getElementById("modalHistorial");
+    const modal = new bootstrap.Modal(modalEl);
+    const datos = document.getElementById("tablaDatosPrestamo");
+    const tbody = document.getElementById("tablaHistorialBody");
+
+    // 🕓 Mostrar “Cargando” mientras llega la respuesta
+    datos.innerHTML = `<tr><td colspan="8"><em>Cargando...</em></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6"><em>Cargando...</em></td></tr>`;
+
+    try {
+      const res = await fetch(`/historial_abonos/${id}`);
+      const data = await res.json();
+
+      // 🧾 Si no hay abonos o préstamo, mostrar mensaje en el modal
+      if (!data.ok) {
+        datos.innerHTML = `<tr><td colspan="8"><em>${data.error || "Este cliente no tiene préstamo registrado."}</em></td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6"><em>${data.error || "No se registran abonos para este cliente."}</em></td></tr>`;
+        modal.show();
+        return;
+      }
+
+      // ✅ Si todo está correcto, rellenar el modal
+      const p = data.prestamo;
+      datos.innerHTML = `
+        <tr>
+          <td>${p.nombre}</td>
+          <td>${p.fecha_inicial}</td>
+          <td>$${p.monto.toFixed(2)}</td>
+          <td>$${p.total.toFixed(2)}</td>
+          <td>$${p.cuota.toFixed(2)}</td>
+          <td>${p.modo}</td>
+          <td>${p.datos}</td>
+          <td>$${p.saldo.toFixed(2)}</td>
+        </tr>`;
+
+      tbody.innerHTML = data.abonos.length > 0
+        ? data.abonos.map(a => `
+          <tr>
+            <td>${a.codigo}</td>
+            <td>${a.fecha}</td>
+            <td>${a.hora}</td>
+            <td>$${a.monto.toFixed(2)}</td>
+            <td>$${a.saldo.toFixed(2)}</td>
+            <td>${a.id > 0 ? `<button class="btn btn-danger btn-sm eliminar-abono" data-id="${a.id}" data-cliente="${id}">🗑️</button>` : "<span>—</span>"}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="6"><em>Este cliente no tiene abonos registrados.</em></td></tr>`;
+
+      modal.show();
+
+    } catch (err) {
+      // ⚠️ Error de conexión o fallo inesperado
+      datos.innerHTML = `<tr><td colspan="8"><em>Error al conectar con el servidor.</em></td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="6"><em>No se pudo cargar el historial.</em></td></tr>`;
+      modal.show();
+      console.error("Error al cargar historial:", err);
+    }
+  });
+});
+  // --- Eliminar abono ---
+  document.addEventListener("click", async (e) => {
+    if (e.target.classList.contains("eliminar-abono")) {
+      const id = e.target.dataset.id;
+      const clienteId = e.target.dataset.cliente;
+      if (!confirm("¿Seguro que deseas eliminar este abono?")) return;
       try {
-        const res = await fetch(form.action, {
-          method: 'POST',
-          body: formData,
-          headers: { 'X-Requested-With': 'fetch' }
+        const res = await fetch(`/eliminar_abono/${id}`, {
+          method: "POST",
+          headers: { "X-Requested-With": "fetch" }
         });
         const data = await res.json();
-        if (!res.ok || !data.ok) {
-          playSound(false);
-          alert(data.error || "❌ Error al registrar el abono.");
+
+        if (!data.ok) {
+          alert("❌ " + (data.error || "No se pudo eliminar."));
           return;
         }
 
-        const saldoElem = document.querySelector(`.saldo-texto[data-cliente-id="${data.cliente_id}"]`);
+        const fila = e.target.closest("tr");
+        if (fila) fila.remove();
+
+        const saldoElem = document.querySelector(`.saldo-texto[data-cliente-id="${clienteId}"]`);
         if (saldoElem) {
           saldoElem.textContent = data.saldo.toFixed(2);
           saldoElem.style.transition = "background-color 0.6s";
-          saldoElem.style.backgroundColor = data.cancelado ? "rgba(255,0,0,0.2)" : "rgba(0,255,0,0.2)";
+          saldoElem.style.backgroundColor = "rgba(255, 0, 0, 0.15)";
           setTimeout(() => saldoElem.style.backgroundColor = "", 800);
         }
 
         playSound(true);
-        input.classList.add('bg-success', 'text-white');
-        input.value = '';
-        const codigoCliente = form.querySelector('input[name="codigo"]').value;
-        localStorage.setItem(`abonado_${codigoCliente}`, hoy);
-
-        const fila = form.closest('tr');
-        if (fila) {
-          fila.classList.add('fila-parpadea');
-          setTimeout(() => fila.classList.remove('fila-parpadea'), 1200);
-        }
-
-        const ordenActual = parseInt(form.dataset.orden);
-        const siguiente = document.querySelector(`.form-abono[data-orden="${ordenActual + 1}"]`);
-        if (siguiente) siguiente.querySelector('input[name="monto"]').focus();
-        else forms[0].querySelector('input[name="monto"]').focus();
-      } catch (error) {
+        alert("🗑️ Abono eliminado correctamente.");
+      } catch (err) {
         playSound(false);
-        console.error(error);
-        alert("Error de conexión al registrar abono.");
+        alert("Error de conexión al eliminar abono.");
       }
+    }
+  });
+});
+</script>
+
+<!-- =================== BUSCADOR EN TIEMPO REAL =================== -->
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+  const input = document.getElementById("buscarCliente");
+  const filas = document.querySelectorAll(".fila-cliente");
+
+  input.addEventListener("keyup", function() {
+    const texto = this.value.toLowerCase().trim();
+    filas.forEach(fila => {
+      const nombre = fila.querySelector(".nombre-cliente").textContent.toLowerCase();
+      fila.style.display = nombre.includes(texto) ? "" : "none";
     });
   });
 });
-
-// 🕛 Limpieza automática localStorage
-(function limpiarAbonosViejos() {
-  const hoy = new Date().toISOString().slice(0, 10);
-  Object.keys(localStorage).forEach(k => {
-    if (k.startsWith("abonado_") && localStorage.getItem(k) !== hoy) localStorage.removeItem(k);
-  });
-})();
 </script>
 
+<!-- =================== ESTILOS =================== -->
 <style>
-.cancelado { background-color: #f8d7da; color: #721c24; }
-.plazo-vencido { background-color: rgba(255,165,0,0.15)!important; }
-.plazo-moroso { background-color: rgba(255,0,0,0.15)!important; }
+/* 🚫 Cliente cancelado */
+.cancelado {
+  background-color: #f8d7da;
+  color: #721c24;
+}
+
+/* 🟠 Plazo vencido (en advertencia) */
+.plazo-vencido {
+  background-color: rgba(255,165,0,0.15) !important;
+}
+
+/* 🔴 Plazo moroso (grave) */
+.plazo-moroso {
+  background-color: rgba(255,0,0,0.15) !important;
+}
+
+/* 🔴 Interés mensual vencido */
+.interes-vencido {
+  background-color: rgba(255, 0, 0, 0.1) !important; /* fondo rojo suave */
+  border-left: 4px solid #ff4d4d; /* borde rojo lateral */
+  animation: parpadeoInteres 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes parpadeoInteres {
+  from { background-color: rgba(255, 0, 0, 0.1); }
+  to { background-color: rgba(255, 0, 0, 0.25); }
+}
+
+/* 💰 Celda de abono */
+.abono-td form {
+  align-items: center;
+  justify-content: center;
+  gap: 0.3em;
+}
+
+/* 💵 Saldo clickeable (abre historial) */
+.saldo-clickable {
+  font-size: 1em;
+  font-weight: bold;
+  color: #0d6efd;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* ✅ Animación verde al registrar abono */
+.fila-parpadea {
+  animation: parpadeoVerde 1s ease-out;
+}
+
 @keyframes parpadeoVerde {
   0% { background-color: #d4edda; }
   50% { background-color: #b6e0c3; }
   100% { background-color: transparent; }
 }
-.fila-parpadea { animation: parpadeoVerde 1s ease-out; }
-.abono-td form{align-items:center;justify-content:center;gap:0.3em;}
-.saldo-clickable{font-size:1em;font-weight:bold;color:#0d6efd;text-decoration:underline;}
 </style>
+
+{% if resaltado_id %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  const fila = document.querySelector(`#cliente-{{ resaltado_id }}`);
+  if (fila) {
+    fila.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => {
+      const inputAbono = fila.querySelector("input[name='monto']");
+      if (inputAbono) {
+        inputAbono.focus();
+        inputAbono.style.transition = "box-shadow 0.6s ease";
+        inputAbono.style.boxShadow = "0 0 10px rgba(0,123,255,0.6)";
+        setTimeout(() => inputAbono.style.boxShadow = "", 1000);
+      }
+    }, 500);
+  }
+});
+</script>
+{% endif %}
+
+<!-- =================== ELIMINAR CLIENTE SIN RECARGAR =================== -->
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  document.querySelectorAll(".eliminar-cliente-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.id;
+      const nombre = btn.dataset.nombre;
+
+      if (!confirm(`¿Seguro que deseas eliminar a ${nombre}? Esta acción no se puede deshacer.`))
+        return;
+
+      try {
+        const res = await fetch(`/eliminar_cliente/${id}`, {
+          method: "POST",
+          headers: { "X-Requested-With": "fetch" }
+        });
+        const data = await res.json();
+
+        if (!data.ok) {
+          alert("❌ " + (data.error || "No se pudo eliminar el cliente."));
+          return;
+        }
+
+        // 💨 Desvanecer fila eliminada
+        const fila = document.getElementById(`cliente-${id}`);
+        if (fila) {
+          fila.style.transition = "opacity 0.5s ease, transform 0.5s ease";
+          fila.style.opacity = "0";
+          fila.style.transform = "translateX(-20px)";
+          setTimeout(() => fila.remove(), 500);
+        }
+
+        // ✅ Mensaje visual
+        const toast = document.createElement("div");
+        toast.className = "alert alert-success position-fixed top-0 start-50 translate-middle-x mt-3 shadow";
+        toast.style.zIndex = 2000;
+        toast.textContent = `🗑️ Cliente ${nombre} eliminado correctamente.`;
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 3000);
+
+      } catch (err) {
+        alert("❌ Error al eliminar el cliente.");
+        console.error(err);
+      }
+    });
+  });
+});
+</script>
+
 {% endblock %}
