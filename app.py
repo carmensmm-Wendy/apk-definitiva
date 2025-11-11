@@ -6,7 +6,7 @@ import os
 from functools import wraps
 from flask import Flask, session, redirect, url_for, flash
 from flask_migrate import Migrate
-from extensions import db
+from extensions import db, cache  # ✅ incluye cache
 
 # ---------------------------
 # ⏰ Importar módulo de tiempo centralizado
@@ -22,7 +22,6 @@ app.secret_key = os.environ.get("APP_SECRET", "clave_secreta_local_cámbiala")
 # ======================================================
 # 🕒 Registrar funciones globales para Jinja (uso en HTML)
 # ======================================================
-# 🔹 Permite usar {{ hora_actual() }}, {{ hora_chile() }} y el filtro |hora_chile
 app.jinja_env.globals.update(hora_actual=hora_actual)
 app.jinja_env.filters["hora_chile"] = hora_chile
 app.jinja_env.globals.update(hora_chile=hora_chile)
@@ -31,15 +30,19 @@ app.jinja_env.globals.update(hora_chile=hora_chile)
 # ⚙️ Configuración de la base de datos (Neon)
 # ======================================================
 
-# 🔗 Cadena directa de conexión Neon (una sola línea, tal como la entrega Neon)
-DATABASE_URL = "postgresql+psycopg2://neondb_owner:npg_W6kO3HxNzudU@ep-round-shape-a462zq46-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+# 🔗 Nueva cadena de conexión Neon
+DATABASE_URL = (
+    "postgresql+psycopg2://neondb_owner:"
+    "npg_W6kO3HxNzudU@ep-round-shape-a462zq46-pooler."
+    "us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+)
 
-# 🔁 Compatibilidad Render (por si en el futuro usas su variable de entorno)
+# 🔁 Compatibilidad Render (por si en el futuro usas variable de entorno)
 env_url = os.getenv("DATABASE_URL")
 if env_url and env_url != "":
     DATABASE_URL = env_url.replace("postgres://", "postgresql://", 1)
 
-# Configuración de SQLAlchemy
+# Configuración SQLAlchemy
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
@@ -69,6 +72,7 @@ app.register_blueprint(app_rutas)
 # 📦 Inicializar extensiones
 # ======================================================
 db.init_app(app)
+cache.init_app(app)  # ✅ ESTA LÍNEA ES LA QUE FALTABA
 migrate = Migrate(app, db)
 
 # ======================================================
