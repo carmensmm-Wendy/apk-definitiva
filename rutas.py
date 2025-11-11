@@ -8,7 +8,6 @@ from flask import (
     Blueprint, render_template, request, redirect,
     url_for, flash, session, jsonify
 )
-from helpers import mes_actual_chile_bounds
 from functools import wraps
 from sqlalchemy import func
 from extensions import db
@@ -19,7 +18,8 @@ from helpers import (
     obtener_resumen_total,
     actualizar_liquidacion_por_movimiento,
 )
-from tiempo import hora_actual, to_hora_chile as hora_chile  # ✅ CORRECTO, sin import circular
+from tiempo import hora_actual, to_hora_chile as hora_chile, mes_actual_chile_bounds
+import tiempo
 
 
 # ======================================================
@@ -136,100 +136,119 @@ def dashboard():
     )
 
 
+
 # ======================================================
-# 🏠 RUTA PRINCIPAL — CLIENTES + TARJETA DE RESUMEN (con CACHÉ DE DÍA)
+# 🏠 RUTA PRINCIPAL — CLIENTES + TARJETA DE RESUMEN (FINAL)
 # ======================================================
 from sqlalchemy.orm import joinedload
 from sqlalchemy import func
 from datetime import timedelta
 from flask import current_app
-import time
 
-# ⚙️ Caché en memoria (simple y segura)
+# caché memoria del día
 _cache_resumen = {"fecha": None, "data": None, "timestamp": 0}
 
 @app_rutas.route("/")
 @login_required
 def index():
-    """Lista de clientes activos y resumen financiero del día (optimizado con caché)."""
+    from helpers import eliminar_cache_resumen_hoy, obtener_resumen_total, actualizar_liquidacion_por_movimiento
+
+    eliminar_cache_resumen_hoy()  # evita corrupción visual después de mover orden
 
     hoy = local_date()
 
-    # ======================================================
-    # ⚡ Recuperar del caché si es del mismo día y reciente (< 30 s)
-    # ======================================================
+    # === USAR CACHE SI ES MISMO DÍA Y <30s ============================
+    import time
     if (
         _cache_resumen["fecha"] == hoy
         and time.time() - _cache_resumen["timestamp"] < 30
     ):
-        resumen_hoy = _cache_resumen["data"]["resumen_hoy"]
-        resumen_total = _cache_resumen["data"]["resumen_total"]
-        clientes = _cache_resumen["data"]["clientes"]
-        print("♻️  Usando caché de resumen del día (sin recalcular SQL)")
-    else:
-        print("⚙️  Calculando resumen y cargando clientes desde BD...")
-
-        # 🧾 Cargar todos los clientes activos + préstamos (consulta optimizada)
-        clientes = (
-            Cliente.query.options(joinedload(Cliente.prestamos))
-            .filter_by(cancelado=False)
-            .order_by(Cliente.orden.asc().nullsfirst(), Cliente.id.asc())
-            .all()
+        print("♻️ Cache index usado.")
+        data = _cache_resumen["data"]
+        return render_template(
+            "index.html",
+            clientes=data["clientes"],
+            resumen_hoy=data["resumen_hoy"],
+            resumen_total=data["resumen_total"],
+            hoy=hoy
         )
 
-        # 🔄 Reasignar orden si está roto
-        orden_cambiado = False
-        for idx, c in enumerate(clientes, start=1):
-            if not c.orden or c.orden != idx:
-                c.orden = idx
-                orden_cambiado = True
-        if orden_cambiado:
-            db.session.commit()
+    print("⚙️ Recalculando index...")
 
-        # 📆 Estado del plazo
-        subquery = (
-            db.session.query(
-                Prestamo.cliente_id, func.max(Prestamo.fecha).label("ultima_fecha")
+    # clientes activos ordenados
+    clientes = (
+        Cliente.query.options(joinedload(Cliente.prestamos))
+        .filter_by(cancelado=False)
+        .order_by(Cliente.orden.asc().nullsfirst(), Cliente.id.asc())
+        .all()
+    )
+
+    # reparar orden roto
+    orden_cambiado = False
+    for idx, c in enumerate(clientes, start=1):
+        if not c.orden or c.orden != idx:
+            c.orden = idx
+            orden_cambiado = True
+    if orden_cambiado:
+        db.session.commit()
+
+    # estado plazo
+    subquery = (
+        db.session.query(
+            Prestamo.cliente_id, func.max(Prestamo.fecha).label("ultima_fecha")
+        )
+        .group_by(Prestamo.cliente_id)
+        .subquery()
+    )
+    ultimos = dict(db.session.query(subquery.c.cliente_id, subquery.c.ultima_fecha).all())
+
+    for c in clientes:
+        estado = "normal"
+        ultima_fecha = ultimos.get(c.id)
+        if ultima_fecha:
+            p = (
+                Prestamo.query.filter_by(cliente_id=c.id, fecha=ultima_fecha).first()
             )
-            .group_by(Prestamo.cliente_id)
-            .subquery()
-        )
-        ultimos = dict(
-            db.session.query(subquery.c.cliente_id, subquery.c.ultima_fecha).all()
-        )
+            if p and p.plazo:
+                fecha_venc = p.fecha + timedelta(days=p.plazo)
+                dias_pasados = (hoy - fecha_venc).days
+                if 0 <= dias_pasados < 30:
+                    estado = "vencido"
+                elif dias_pasados >= 30:
+                    estado = "moroso"
+        c.estado_plazo = estado
 
-        for c in clientes:
-            estado = "normal"
-            ultima_fecha = ultimos.get(c.id)
-            if ultima_fecha:
-                p = (
-                    Prestamo.query.filter_by(cliente_id=c.id, fecha=ultima_fecha).first()
-                )
-                if p and p.plazo:
-                    fecha_venc = p.fecha + timedelta(days=p.plazo)
-                    dias_pasados = (hoy - fecha_venc).days
-                    if 0 <= dias_pasados < 30:
-                        estado = "vencido"
-                    elif dias_pasados >= 30:
-                        estado = "moroso"
-            c.estado_plazo = estado
+    # === resumen del día LOC contable =================================
+    liq_hoy = actualizar_liquidacion_por_movimiento(hoy, commit=False)
 
-        # 📊 Resumen del día (helpers.py)
-        from helpers import resumen_dia
-        from tiempo import day_range
+    resumen_hoy = {
+        "entradas": liq_hoy.entradas,
+        "entradas_caja": liq_hoy.entradas_caja,
+        "prestamos_hoy": liq_hoy.prestamos_hoy,
+        "salidas": liq_hoy.salidas,
+        "gastos": liq_hoy.gastos,
+        "caja_manual": liq_hoy.caja_manual,
+        "caja": liq_hoy.caja,
+    }
 
-        start, end = day_range(hoy)
-        resumen_hoy = resumen_dia(db, start, end)
-        resumen_total = obtener_resumen_total()
+    resumen_total = obtener_resumen_total()
 
-        # 💾 Guardar en caché
-        _cache_resumen["fecha"] = hoy
-        _cache_resumen["timestamp"] = time.time()
-        _cache_resumen["data"] = {
-            "resumen_hoy": resumen_hoy,
-            "resumen_total": resumen_total,
-            "clientes": clientes,
-        }
+    # === SAVE CACHE =====================================
+    _cache_resumen["fecha"] = hoy
+    _cache_resumen["data"] = {
+        "clientes": clientes,
+        "resumen_hoy": resumen_hoy,
+        "resumen_total": resumen_total,
+    }
+    _cache_resumen["timestamp"] = time.time()
+
+    return render_template(
+        "index.html",
+        clientes=clientes,
+        resumen_hoy=resumen_hoy,
+        resumen_total=resumen_total,
+        hoy=hoy
+    )
 
     # ======================================================
     # 📋 Renderizar plantilla
@@ -246,50 +265,6 @@ def index():
         total_gastos=resumen_hoy["gastos"],
         caja_total=resumen_hoy["caja_total"],
     )
-
-
-# ======================================================
-# ✏️ EDITAR PRÉSTAMO — (GET/POST)
-# ======================================================
-@app_rutas.route("/editar_prestamo/<int:cliente_id>", methods=["GET", "POST"])
-def editar_prestamo(cliente_id):
-    cliente = Cliente.query.get_or_404(cliente_id)
-    prestamo = max(cliente.prestamos, key=lambda p: p.fecha) if cliente.prestamos else None
-
-    # 📤 GET — devolver datos actuales
-    if request.method == "GET":
-        if not prestamo:
-            return jsonify({"ok": False, "error": "El cliente no tiene préstamo activo."})
-        return jsonify({
-            "ok": True,
-            "data": {
-                "monto": prestamo.monto,
-                "interes": prestamo.interes,
-                "plazo": prestamo.plazo,
-                "frecuencia": prestamo.frecuencia
-            }
-        })
-
-    # 📥 POST — actualizar préstamo
-    try:
-        if not prestamo:
-            return jsonify({"ok": False, "error": "No hay préstamo asociado a este cliente."})
-
-        prestamo.monto = float(request.form.get("monto", prestamo.monto))
-        prestamo.interes = float(request.form.get("interes", prestamo.interes))
-        prestamo.plazo = int(request.form.get("plazo", prestamo.plazo))
-        prestamo.frecuencia = request.form.get("frecuencia", prestamo.frecuencia)
-
-        # Mantener saldo si ya tiene abonos
-        if not prestamo.abonos or len(prestamo.abonos) == 0:
-            prestamo.saldo = prestamo.monto + (prestamo.monto * prestamo.interes / 100)
-
-        db.session.commit()
-        return jsonify({"ok": True, "msg": "Préstamo actualizado correctamente."})
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"ok": False, "error": str(e)})
-
 
 # ======================================================
 # 🔐 LOGIN Y LOGOUT
@@ -314,24 +289,17 @@ def logout():
     return redirect(url_for("app_rutas.login"))
 
 # ======================================================
-# 🧍‍♂️ NUEVO CLIENTE — CREACIÓN Y RENOVACIÓN (versión FINAL OPTIMIZADA — commit controlado)
+# 🧍‍♂️ NUEVO CLIENTE — CREACIÓN Y RENOVACIÓN (FINAL con orden automático igual que index)
 # ======================================================
 @app_rutas.route("/nuevo_cliente", methods=["GET", "POST"])
 @login_required
 def nuevo_cliente():
-    """
-    Crea un cliente nuevo o renueva uno cancelado sin eliminar su historial.
-    - Si no existe → se crea normalmente.
-    - Si existe y está cancelado → se CREA UN NUEVO REGISTRO ACTIVO (el viejo queda en cancelados).
-    - Si existe y está activo → advertencia.
-    """
     from datetime import timedelta
+    from sqlalchemy import func
+    from helpers import eliminar_cache_resumen_hoy
 
     if request.method == "POST":
         try:
-            # ------------------------------------------------------
-            # 🧾 Captura de datos del formulario
-            # ------------------------------------------------------
             nombre = (request.form.get("nombre") or "").strip()
             codigo = (request.form.get("codigo") or "").strip()
             direccion = (request.form.get("direccion") or "").strip()
@@ -341,6 +309,10 @@ def nuevo_cliente():
             plazo = request.form.get("plazo", type=int) or 0
             orden = request.form.get("orden", type=int) or 0
             frecuencia = (request.form.get("frecuencia") or "diario").strip().lower()
+
+            if orden <= 0:
+                flash("El número de orden es inválido. Ese número no existe en la lista.", "warning")
+                return redirect(url_for("app_rutas.nuevo_cliente"))
 
             FRECUENCIAS_VALIDAS = {"diario", "semanal", "quincenal", "mensual"}
             if frecuencia not in FRECUENCIAS_VALIDAS:
@@ -362,15 +334,23 @@ def nuevo_cliente():
                     codigo=cliente.codigo,
                     direccion=direccion or cliente.direccion or "",
                     telefono=telefono or cliente.telefono or "",
-                    orden=orden or cliente.orden or 0,
+                    orden=orden,
                     fecha_creacion=hoy,
                     ultimo_abono_fecha=None,
                     saldo=0.0,
                     cancelado=False,
                 )
                 db.session.add(nuevo)
-                db.session.flush()  # obtener nuevo.id
+                db.session.flush()
 
+                # mover otros para abajo (MISMA LÓGICA DEL INDEX)
+                Cliente.query.filter(
+                    Cliente.id != nuevo.id,
+                    Cliente.cancelado == False,
+                    Cliente.orden >= nuevo.orden
+                ).update({Cliente.orden: Cliente.orden + 1}, synchronize_session=False)
+
+                # préstamo
                 if monto > 0:
                     saldo_total = monto + (monto * (interes / 100.0))
                     prestamo = Prestamo(
@@ -391,26 +371,24 @@ def nuevo_cliente():
                     nuevo.saldo = saldo_total
                     db.session.add_all([prestamo, mov])
 
-                cliente.ultimo_abono_fecha = cliente.ultimo_abono_fecha or hora_actual()
+                eliminar_cache_resumen_hoy()
                 db.session.commit()
 
-                # ✅ Recalcular sin duplicar commits
                 if monto > 0:
                     actualizar_liquidacion_por_movimiento(hoy, commit=False)
                     db.session.commit()
-
                 flash(f"Cliente {nuevo.nombre} renovado correctamente (histórico preservado).", "success")
                 return redirect(url_for("app_rutas.index", focus_abono=nuevo.id))
 
             # ======================================================
-            # 🚫 Cliente activo existente
+            # 🚫 Ya existe activo
             # ======================================================
             if cliente and not cliente.cancelado:
                 flash("Ese código ya pertenece a un cliente activo.", "warning")
                 return redirect(url_for("app_rutas.nuevo_cliente"))
 
             # ======================================================
-            # 🧍‍♂️ Nuevo cliente (no existe)
+            # 🆕 Nuevo cliente
             # ======================================================
             nuevo = Cliente(
                 nombre=nombre or codigo,
@@ -424,6 +402,14 @@ def nuevo_cliente():
             db.session.add(nuevo)
             db.session.flush()
 
+            # mover otros para abajo exactamente igual que index
+            Cliente.query.filter(
+                Cliente.id != nuevo.id,
+                Cliente.cancelado == False,
+                Cliente.orden >= nuevo.orden
+            ).update({Cliente.orden: Cliente.orden + 1}, synchronize_session=False)
+
+            # préstamo inicial
             if monto > 0:
                 saldo_total = monto + (monto * (interes / 100.0))
                 prestamo = Prestamo(
@@ -444,9 +430,9 @@ def nuevo_cliente():
                 nuevo.saldo = saldo_total
                 db.session.add_all([prestamo, mov])
 
+            eliminar_cache_resumen_hoy()
             db.session.commit()
 
-            # ✅ Recalcular liquidación sin segundo commit redundante
             if monto > 0:
                 actualizar_liquidacion_por_movimiento(hoy, commit=False)
                 db.session.commit()
@@ -460,9 +446,7 @@ def nuevo_cliente():
             flash("Ocurrió un error inesperado al crear o renovar el cliente.", "danger")
             return redirect(url_for("app_rutas.nuevo_cliente"))
 
-    # ------------------------------------------------------
-    # 📋 GET — Mostrar formulario
-    # ------------------------------------------------------
+    # GET
     try:
         codigo_sugerido = generar_codigo_cliente()
     except Exception:
@@ -698,60 +682,49 @@ def reactivar_cliente(cliente_id):
 @app_rutas.route("/actualizar_orden/<int:cliente_id>", methods=["POST"])
 @login_required
 def actualizar_orden(cliente_id):
-    from sqlalchemy import and_
+    from helpers import eliminar_cache_resumen_hoy
 
     nueva_orden = request.form.get("orden", type=int)
     if not nueva_orden or nueva_orden < 1:
-        flash("Debe ingresar un número de orden válido (>= 1).", "warning")
-        return redirect(url_for("app_rutas.index"))
+        return "orden inválida", 400
 
     cliente = Cliente.query.get_or_404(cliente_id)
-    orden_actual = cliente.orden or 9999  # si no tenía, lo tratamos como muy alto
+    orden_actual = cliente.orden or 9999
 
     if nueva_orden == orden_actual:
-        flash(f"El cliente {cliente.nombre} ya tiene el orden {nueva_orden}.", "info")
-        return redirect(url_for("app_rutas.index"))
+        return "OK"
 
     try:
-        # 📊 Si el nuevo orden es menor → el cliente sube y los demás bajan
+        # ✅ REORDENAMIENTO UNIVERSAL (funciona saltos cortos y largos)
         if nueva_orden < orden_actual:
-            (
-                Cliente.query
-                .filter(
-                    Cliente.id != cliente.id,
-                    Cliente.cancelado == False,
-                    Cliente.orden >= nueva_orden,
-                    Cliente.orden < orden_actual
-                )
-                .update({Cliente.orden: Cliente.orden + 1}, synchronize_session=False)
-            )
+            # mover hacia arriba
+            Cliente.query.filter(
+                Cliente.orden >= nueva_orden,
+                Cliente.orden < orden_actual,
+                Cliente.cancelado == False,
+                Cliente.id != cliente.id
+            ).update({Cliente.orden: Cliente.orden + 1}, synchronize_session=False)
         else:
-            # 📉 Si el nuevo orden es mayor → el cliente baja y los demás suben
-            (
-                Cliente.query
-                .filter(
-                    Cliente.id != cliente.id,
-                    Cliente.cancelado == False,
-                    Cliente.orden <= nueva_orden,
-                    Cliente.orden > orden_actual
-                )
-                .update({Cliente.orden: Cliente.orden - 1}, synchronize_session=False)
-            )
+            # mover hacia abajo
+            Cliente.query.filter(
+                Cliente.orden <= nueva_orden,
+                Cliente.orden > orden_actual,
+                Cliente.cancelado == False,
+                Cliente.id != cliente.id
+            ).update({Cliente.orden: Cliente.orden - 1}, synchronize_session=False)
 
-        # ✅ Asignar el nuevo orden al cliente
         cliente.orden = nueva_orden
         db.session.commit()
 
-        flash(f"✅ Orden del cliente {cliente.nombre} actualizada a {nueva_orden}.", "success")
+        # 🔥 invalidar cache del día
+        eliminar_cache_resumen_hoy()
+
+        return "OK"
 
     except Exception as e:
         db.session.rollback()
-        flash("❌ Error al actualizar el orden.", "danger")
         print("[ERROR actualizar_orden]", e)
-
-    return redirect(url_for("app_rutas.index"))
-
-
+        return "error interno", 500
 
 # ======================================================
 # ❌ ELIMINAR CLIENTE — VERSIÓN FINAL (prestamo_revertido + capital real)
@@ -992,6 +965,7 @@ def historial_abonos_json(cliente_id):
         "abonos": data_abonos
     })
 
+
 # ======================================================
 # 💰 REGISTRAR ABONO POR CÓDIGO (versión estable, permite abonar cancelados)
 # ======================================================
@@ -1106,6 +1080,55 @@ def registrar_abono_por_codigo():
     if cancelado:
         flash(f"✅ {cliente.nombre} quedó en saldo 0 y fue movido a cancelados.", "info")
     return redirect(url_for("app_rutas.index"))
+
+
+# ======================================================
+# 💹 GANANCIAS DEL MES — por interés
+# ======================================================
+@app_rutas.route("/ganancias_mes")
+@login_required
+def ganancias_mes_view():
+    # ✅ Se llama directamente desde el módulo tiempo
+    import tiempo
+    inicio, fin, _ahora = tiempo.mes_actual_chile_bounds()
+
+    q = (
+        db.session.query(Prestamo, Cliente)
+        .join(Cliente, Prestamo.cliente_id == Cliente.id)
+        .filter(Prestamo.fecha >= inicio, Prestamo.fecha <= fin)
+        .order_by(Prestamo.fecha.asc(), Cliente.codigo.asc())
+    )
+
+    filas = []
+    total_venta = 0
+    total_ganancia = 0
+
+    for p, c in q.all():
+        venta = float(p.monto or 0)
+        interes = float(p.interes or 0)
+        ganancia = venta * (interes / 100)
+
+        filas.append({
+            "codigo": c.codigo,
+            "fecha": p.fecha,
+            "nombre": c.nombre,
+            "venta": str(int(round(venta))),
+            "interes": str(interes),
+            "ganancia": str(int(round(ganancia))),
+        })
+
+        total_venta += int(round(venta))
+        total_ganancia += int(round(ganancia))
+
+    return render_template(
+        "ganancias_mes.html",
+        filas=filas,
+        total_venta=str(total_venta),
+        total_ganancia=str(total_ganancia),
+        fecha_inicio=inicio,
+        fecha_fin=fin
+    )
+
 
 # ======================================================
 # 🗑️ ELIMINAR ABONO (reactiva y recalcula caja histórica)
@@ -1339,7 +1362,7 @@ def reparar_caja():
 
 
 # ======================================================
-# 📊 LIQUIDACIÓN — DÍA ACTUAL (CORREGIDA)
+# 📊 LIQUIDACIÓN DEL DÍA (con arrastre y totales coherentes)
 # ======================================================
 @app_rutas.route("/liquidacion")
 @login_required
@@ -1347,103 +1370,35 @@ def liquidacion_view():
     try:
         hoy = local_date()
 
-        # Buscar o crear liquidación del día
-        liq = Liquidacion.query.filter_by(fecha=hoy).first()
-        if not liq:
-            liq = crear_liquidacion_para_fecha(hoy)  # debe devolver un Liquidacion persistible
+        # 1) Garantiza registro de liquidación de hoy con caja_anterior arrastrada
+        crear_liquidacion_para_fecha(hoy)
 
-        start, end = day_range(hoy)
-
-        # 💰 Total abonos (ingresos por cuotas)
-        total_abonos = (
-            db.session.query(func.coalesce(func.sum(Abono.monto), 0.0))
-            .filter(Abono.fecha >= start, Abono.fecha < end)
-            .scalar() or 0.0
-        )
-
-        # 🏦 Total préstamos del día (desde Prestamo, consistente con Dashboard/Index)
-        total_prestamos = (
-            db.session.query(func.coalesce(func.sum(Prestamo.monto), 0.0))
-            .join(Cliente, Prestamo.cliente_id == Cliente.id)
-            .filter(
-                Cliente.cancelado == False,
-                Prestamo.fecha >= start,
-                Prestamo.fecha < end
-            )
-            .scalar() or 0.0
-        )
-
-        # 💵 Entradas manuales
-        total_entradas_caja = (
-            db.session.query(func.coalesce(func.sum(MovimientoCaja.monto), 0.0))
-            .filter(
-                MovimientoCaja.tipo == "entrada_manual",
-                MovimientoCaja.fecha >= start,
-                MovimientoCaja.fecha < end
-            )
-            .scalar() or 0.0
-        )
-
-        # 💸 Salidas
-        total_salidas = (
-            db.session.query(func.coalesce(func.sum(MovimientoCaja.monto), 0.0))
-            .filter(
-                MovimientoCaja.tipo == "salida",
-                MovimientoCaja.fecha >= start,
-                MovimientoCaja.fecha < end
-            )
-            .scalar() or 0.0
-        )
-
-        # 🧾 Gastos
-        total_gastos = (
-            db.session.query(func.coalesce(func.sum(MovimientoCaja.monto), 0.0))
-            .filter(
-                MovimientoCaja.tipo == "gasto",
-                MovimientoCaja.fecha >= start,
-                MovimientoCaja.fecha < end
-            )
-            .scalar() or 0.0
-        )
-
-        # 💼 Caja del día (misma fórmula que Dashboard/Index)
-        total_caja = total_abonos + total_entradas_caja - (total_prestamos + total_salidas + total_gastos)
-
-        # 🔄 Actualizar objeto Liquidacion con los nombres REALES de columnas
-        #    (según usas en /liquidaciones y en tus plantillas)
-        liq.entradas       = total_abonos        # 👈 antes ponías liq.abonos (NO existe)
-        liq.prestamos_hoy  = total_prestamos
-        liq.entradas_caja  = total_entradas_caja
-        liq.salidas        = total_salidas
-        liq.gastos         = total_gastos
-        liq.caja           = total_caja
-
-        db.session.add(liq)
+        # 2) Recalcula totales del día usando movimientos y abonos (no doble commit)
+        liq = actualizar_liquidacion_por_movimiento(hoy, commit=False)
         db.session.commit()
 
-        # 📊 Resumen general
+        # 3) Resumen global (caja total acumulada y cartera)
         resumen = obtener_resumen_total()
-        cartera_total = resumen.get("cartera_total", 0.0)
+        cartera_total = float(resumen.get("cartera_total", 0.0))
 
+        # 4) Render compatible con plantilla `liquidacion.html`
         return render_template(
             "liquidacion.html",
             hoy=hoy,
             liq=liq,
-            liquidaciones=[liq],
-            total_caja=total_caja,
+            liquidaciones=[liq],            # para la tabla del día
+            total_caja=liq.caja,            # coincide con “Caja Final” del día
             cartera_total=cartera_total,
             resumen=resumen,
         )
 
     except Exception as e:
-        db.session.rollback()
-        print(f"[ERROR liquidacion_view] {e}")
+        print("[ERROR liquidacion_view]", e)
         flash("❌ Error al calcular la liquidación del día.", "danger")
         return redirect(url_for("app_rutas.index"))
 
-
 # ======================================================
-# 🗂️ LIQUIDACIONES — HISTÓRICO Y RANGO DE FECHAS (completo, con días vacíos)
+# 🗂️ LIQUIDACIONES — HISTÓRICO Y RANGO DE FECHAS (con días vacíos)
 # ======================================================
 @app_rutas.route("/liquidaciones", methods=["GET"])
 @login_required
@@ -1451,29 +1406,27 @@ def liquidaciones():
     fecha_desde = request.args.get("desde")
     fecha_hasta = request.args.get("hasta")
 
-    # Si no hay rango, mostrar últimos 10 registros
+    # 🔎 Sin rango: últimos 10 registros reales en BD
     if not fecha_desde or not fecha_hasta:
-        liquidaciones = (
-            Liquidacion.query.order_by(Liquidacion.fecha.desc()).limit(10).all()
-        )
+        items = Liquidacion.query.order_by(Liquidacion.fecha.desc()).limit(10).all()
         resumen = obtener_resumen_total()
         return render_template(
             "liquidaciones.html",
-            liquidaciones=liquidaciones,
+            liquidaciones=items,
             fecha_desde=None,
             fecha_hasta=None,
-            total_entradas=sum(l.entradas or 0 for l in liquidaciones),
-            total_prestamos=sum(l.prestamos_hoy or 0 for l in liquidaciones),
-            total_entradas_caja=sum(l.entradas_caja or 0 for l in liquidaciones),
-            total_salidas=sum(l.salidas or 0 for l in liquidaciones),
-            total_gastos=sum(l.gastos or 0 for l in liquidaciones),
-            total_caja=sum(l.caja or 0 for l in liquidaciones),
+            total_entradas=sum(l.entradas or 0 for l in items),
+            total_prestamos=sum(l.prestamos_hoy or 0 for l in items),
+            total_entradas_caja=sum(l.entradas_caja or 0 for l in items),
+            total_salidas=sum(l.salidas or 0 for l in items),
+            total_gastos=sum(l.gastos or 0 for l in items),
+            total_caja=sum(l.caja or 0 for l in items),
             resumen=resumen,
             hora_chile=hora_chile,
             hora_actual=hora_actual,
         )
 
-    # Convertir fechas
+    # 🗓️ Rango: normaliza fechas y rellena huecos
     try:
         desde = datetime.strptime(fecha_desde, "%Y-%m-%d").date()
         hasta = datetime.strptime(fecha_hasta, "%Y-%m-%d").date()
@@ -1481,55 +1434,44 @@ def liquidaciones():
         flash("Formato de fecha inválido (use YYYY-MM-DD).", "danger")
         return redirect(url_for("app_rutas.liquidaciones"))
 
-    # Obtener liquidaciones existentes en ese rango
     registros = {
-        l.fecha: l for l in Liquidacion.query.filter(
+        l.fecha: l
+        for l in Liquidacion.query.filter(
             Liquidacion.fecha >= desde, Liquidacion.fecha <= hasta
         ).all()
     }
 
-    # Generar todas las fechas del rango
     dias = (hasta - desde).days + 1
-    liquidaciones = []
+    items = []
     for i in range(dias):
         fecha = desde + timedelta(days=i)
         liq = registros.get(fecha)
-
         if not liq:
-            # Crear un objeto "vacío" para mostrar en tabla
+            # objeto “visual” vacío para mostrar fila en la tabla
             liq = Liquidacion(
                 fecha=fecha,
-                caja_manual=0,
-                entradas=0,
-                entradas_caja=0,
-                prestamos_hoy=0,
-                salidas=0,
-                gastos=0,
-                caja=0,
+                caja_manual=0.0,
+                entradas=0.0,
+                entradas_caja=0.0,
+                prestamos_hoy=0.0,
+                salidas=0.0,
+                gastos=0.0,
+                caja=0.0,
             )
-        liquidaciones.append(liq)
-
-    # Calcular totales
-    total_entradas = sum(l.entradas or 0 for l in liquidaciones)
-    total_prestamos = sum(l.prestamos_hoy or 0 for l in liquidaciones)
-    total_entradas_caja = sum(l.entradas_caja or 0 for l in liquidaciones)
-    total_salidas = sum(l.salidas or 0 for l in liquidaciones)
-    total_gastos = sum(l.gastos or 0 for l in liquidaciones)
-    total_caja = sum(l.caja or 0 for l in liquidaciones)
+        items.append(liq)
 
     resumen = obtener_resumen_total()
-
     return render_template(
         "liquidaciones.html",
-        liquidaciones=liquidaciones,
+        liquidaciones=items,
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
-        total_entradas=total_entradas,
-        total_prestamos=total_prestamos,
-        total_entradas_caja=total_entradas_caja,
-        total_salidas=total_salidas,
-        total_gastos=total_gastos,
-        total_caja=total_caja,
+        total_entradas=sum(l.entradas or 0 for l in items),
+        total_prestamos=sum(l.prestamos_hoy or 0 for l in items),
+        total_entradas_caja=sum(l.entradas_caja or 0 for l in items),
+        total_salidas=sum(l.salidas or 0 for l in items),
+        total_gastos=sum(l.gastos or 0 for l in items),
+        total_caja=sum(l.caja or 0 for l in items),
         resumen=resumen,
         hora_chile=hora_chile,
         hora_actual=hora_actual,
@@ -1628,52 +1570,6 @@ def prestamos_por_dia(fecha):
         fecha=fecha_obj,
         total_prestamos=total_prestamos,
     )
-
-@app_rutas.route("/ganancias_mes")
-def ganancias_mes_view():
-    inicio, fin, _ahora = mes_actual_chile_bounds()
-
-    q = (
-        db.session.query(Prestamo, Cliente)
-        .join(Cliente, Prestamo.cliente_id == Cliente.id)
-        .filter(Prestamo.fecha >= inicio, Prestamo.fecha <= fin)
-        .order_by(Prestamo.fecha.asc(), Cliente.codigo.asc())
-    )
-
-    filas = []
-    total_venta = 0
-    total_ganancia = 0
-
-    for p, c in q.all():
-        venta = float(p.monto or 0)
-        interes = float(p.interes or 0)
-        ganancia = venta * (interes / 100)
-
-        venta_i = int(round(venta))
-        ganancia_i = int(round(ganancia))
-
-        filas.append({
-            "codigo": c.codigo,
-            "fecha": p.fecha,
-            "nombre": c.nombre,
-            "venta": str(venta_i),
-            "interes": str(interes),
-            "ganancia": str(ganancia_i)
-        })
-
-        total_venta += venta_i
-        total_ganancia += ganancia_i
-
-    return render_template(
-        "ganancias_mes.html",
-        filas=filas,
-        total_venta=str(total_venta),
-        total_ganancia=str(total_ganancia),
-        fecha_inicio=inicio,
-        fecha_fin=fin
-    )
-
-
 
 # ======================================================
 # 🕒 TEST DE HORA LOCAL DE CHILE 🇨🇱
